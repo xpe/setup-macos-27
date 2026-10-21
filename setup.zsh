@@ -114,6 +114,30 @@ install_command_line_tools() {
   echo "Command Line Tools: done."
 }
 
+# --- Homebrew ----------------------------------------------------------------
+
+# Homebrew's prefix on Apple Silicon.
+BREW="/opt/homebrew/bin/brew"
+BREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
+install_homebrew() {
+  local installer
+  if [[ -x "$BREW" ]]; then
+    echo "Homebrew: already installed, skipping."
+  else
+    echo "Homebrew: installing..."
+    # Download first, so a failed download stops the script (a failing
+    # $(curl ...) inside a command's arguments wouldn't).
+    installer=$(curl -fsSL "$BREW_INSTALL_URL")
+    # NONINTERACTIVE skips the "Press RETURN" prompt. The installer needs sudo;
+    # it uses the credentials cached by start_sudo.
+    NONINTERACTIVE=1 /bin/bash -c "$installer"
+    echo "Homebrew: done."
+  fi
+  # Put brew on PATH for the rest of this script.
+  eval "$("$BREW" shellenv)"
+}
+
 # --- Machine name ------------------------------------------------------------
 
 # Sets all three of macOS's names to the same value:
@@ -245,6 +269,7 @@ load_settings
 ask_settings
 start_sudo
 install_command_line_tools
+install_homebrew
 set_machine_name
 install_gallium
 show_input_menu
