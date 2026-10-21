@@ -167,6 +167,14 @@ caps_lock_to_control() {
   fi
 
   echo "Caps Lock: mapping to Control..."
+  # Write through `defaults`, which goes via cfprefsd (the prefs daemon). Editing
+  # the plist file directly (plutil, PlistBuddy) is the fragile route: cfprefsd
+  # caches prefs and can ignore or overwrite such edits. `defaults import` is no
+  # better: it replaces the whole domain, not one key. The inline XML is how
+  # `defaults` takes an array of dicts (see `man defaults`: values may be given
+  # in plist format). Reading, by contrast, is safe with any parser, hence plutil
+  # in modifier_mapping above. The pref itself is undocumented; it's what
+  # System Settings writes.
   defaults -currentHost write -g "$MODIFIER_PREF" -array \
     "<dict><key>HIDKeyboardModifierMappingSrc</key><integer>$CAPS_LOCK</integer><key>HIDKeyboardModifierMappingDst</key><integer>$CONTROL</integer></dict>"
   echo "Caps Lock: done (takes effect after logging out and back in)."
