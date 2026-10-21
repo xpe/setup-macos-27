@@ -253,13 +253,23 @@ caps_lock_to_control() {
   echo "Caps Lock: done (takes effect after logging out and back in)."
 }
 
-# --- Keyboard and text -------------------------------------------------------
+# --- Preferences -------------------------------------------------------------
 
-# Usage: set_default LABEL DOMAIN KEY TYPE VALUE [NOTE]
+# Apps to restart at the end so pref changes take effect (see restart_apps).
+# typeset -U keeps the array's entries unique.
+typeset -U apps_to_restart=()
+
+# Usage: set_default [-r APP] LABEL DOMAIN KEY TYPE VALUE [NOTE]
 # Writes one pref with `defaults write DOMAIN KEY -TYPE VALUE`, unless it
 # already holds VALUE. `defaults read` prints booleans as 1/0, so -bool values
-# are compared in that form. NOTE, if given, is appended to the done message.
+# are compared in that form. With -r, APP is restarted at the end of the run if
+# the pref was written. NOTE, if given, is appended to the done message.
 set_default() {
+  local app=""
+  if [[ "$1" == -r ]]; then
+    app=$2
+    shift 2
+  fi
   local label=$1 domain=$2 key=$3 type=$4 value=$5 note=${6:-} expected=$5
   if [[ "$type" == bool ]]; then
     [[ "$value" == true ]] && expected=1 || expected=0
@@ -271,8 +281,21 @@ set_default() {
 
   echo "$label: setting to $value..."
   defaults write "$domain" "$key" "-$type" "$value"
+  [[ -n "$app" ]] && apps_to_restart+=("$app")
   echo "$label: done${note:+ ($note)}."
 }
+
+# Restart each app in apps_to_restart. Dock and Finder relaunch on their own
+# when killed.
+restart_apps() {
+  local app
+  for app in "${apps_to_restart[@]}"; do
+    echo "$app: restarting so changes take effect..."
+    killall "$app" 2>/dev/null || true
+  done
+}
+
+# --- Keyboard and text -------------------------------------------------------
 
 # System Settings > Keyboard > Key repeat rate. Lower is faster; 2 is the
 # fastest step on the slider (about 30 ms between repeats).
@@ -335,8 +358,209 @@ clear_dock() {
 
   echo "Dock: clearing pinned apps..."
   defaults write com.apple.dock persistent-apps -array
-  killall Dock  # restarts the Dock so the change takes effect
+  apps_to_restart+=(Dock)
   echo "Dock: done."
+}
+
+# System Settings > Desktop & Dock > "Automatically hide and show the Dock".
+enable_dock_autohide() {
+  set_default -r Dock "Dock auto-hide" com.apple.dock autohide bool true
+}
+
+# System Settings > Desktop & Dock > Size. Stored as a float, in points.
+set_dock_icon_size() {
+  set_default -r Dock "Dock icon size" com.apple.dock tilesize float 48
+}
+
+# System Settings > Desktop & Dock > "Show suggested and recent apps in Dock".
+hide_dock_recent_apps() {
+  set_default -r Dock "Dock recent apps" com.apple.dock show-recents bool false
+}
+
+# System Settings > Desktop & Dock > Mission Control > "Automatically rearrange
+# Spaces based on most recent use".
+disable_rearranging_spaces() {
+  set_default -r Dock "Rearrange Spaces" com.apple.dock mru-spaces bool false
+}
+
+# System Settings > Desktop & Dock > Mission Control > "Group windows by
+# application".
+group_windows_by_app() {
+  set_default -r Dock "Group windows by app" com.apple.dock expose-group-apps bool true
+}
+
+# System Settings > Desktop & Dock > Hot Corners: bottom right. Action 1 is
+# "-" (no action); modifier 0 is no modifier key. The default is Quick Note.
+disable_bottom_right_hot_corner() {
+  set_default -r Dock "Bottom-right hot corner" com.apple.dock wvous-br-corner int 1
+  set_default -r Dock "Bottom-right hot corner modifier" com.apple.dock wvous-br-modifier int 0
+}
+
+# --- Appearance --------------------------------------------------------------
+
+# System Settings > Appearance > Dark. Apps already open switch after logging
+# out and back in.
+use_dark_mode() {
+  set_default "Dark mode" -g AppleInterfaceStyle string Dark \
+    "takes effect after logging out and back in"
+}
+
+# Finder > Settings > Advanced > "Show all filename extensions".
+show_all_extensions() {
+  set_default -r Finder "Show all extensions" -g AppleShowAllExtensions bool true
+}
+
+# System Settings > Desktop & Dock > "Double-click a window's title bar to":
+# not Minimize. (This matches the macOS default.)
+disable_minimize_on_double_click() {
+  set_default "Minimize on double-click" -g AppleMiniaturizeOnDoubleClick bool false
+}
+
+# --- Desktop and window tiling -----------------------------------------------
+
+# System Settings > Desktop & Dock > Windows. The WindowManager prefs are
+# picked up after logging out and back in.
+WINDOW_MANAGER_NOTE="takes effect after logging out and back in"
+
+# "Tiled windows have margins".
+disable_tiled_window_margins() {
+  set_default "Tiled window margins" com.apple.WindowManager \
+    EnableTiledWindowMargins bool false "$WINDOW_MANAGER_NOTE"
+}
+
+# "Drag windows to screen edges to tile".
+disable_edge_drag_tiling() {
+  set_default "Tile by dragging to edges" com.apple.WindowManager \
+    EnableTilingByEdgeDrag bool false "$WINDOW_MANAGER_NOTE"
+}
+
+# "Drag windows to menu bar to fill screen".
+disable_top_edge_drag_tiling() {
+  set_default "Fill by dragging to menu bar" com.apple.WindowManager \
+    EnableTopTilingByEdgeDrag bool false "$WINDOW_MANAGER_NOTE"
+}
+
+# "Hold ⌥ key while dragging windows to tile".
+disable_option_drag_tiling() {
+  set_default "Tile by Option-dragging" com.apple.WindowManager \
+    EnableTilingOptionAccelerator bool false "$WINDOW_MANAGER_NOTE"
+}
+
+# System Settings > Desktop & Dock > Desktop & Stage Manager > Show Items >
+# "On Desktop" (off).
+hide_desktop_items() {
+  set_default "Desktop items" com.apple.WindowManager \
+    HideDesktop bool true "$WINDOW_MANAGER_NOTE"
+}
+
+# System Settings > Desktop & Dock > Desktop & Stage Manager > Show Widgets >
+# "On Desktop" (off).
+hide_desktop_widgets() {
+  set_default "Desktop widgets" com.apple.WindowManager \
+    StandardHideWidgets bool true "$WINDOW_MANAGER_NOTE"
+}
+
+# --- Finder ------------------------------------------------------------------
+
+# View > as List. Folders that already have a saved view keep it.
+use_finder_list_view() {
+  set_default -r Finder "Finder list view" com.apple.finder FXPreferredViewStyle string Nlsv
+}
+
+# Finder > Settings > General > "New Finder windows show": Recents (PfAF).
+set_finder_new_window_target() {
+  set_default -r Finder "Finder new window target" com.apple.finder NewWindowTarget string PfAF
+}
+
+# View > Show Path Bar.
+show_finder_path_bar() {
+  set_default -r Finder "Finder path bar" com.apple.finder ShowPathbar bool true
+}
+
+# Finder > Settings > Advanced > "Show warning before changing an extension".
+disable_extension_change_warning() {
+  set_default -r Finder "Extension change warning" com.apple.finder \
+    FXEnableExtensionChangeWarning bool false
+}
+
+# Finder > Settings > General > "Show these items on the desktop".
+hide_hard_disks_on_desktop() {
+  set_default -r Finder "Hard disks on desktop" com.apple.finder \
+    ShowHardDrivesOnDesktop bool false
+}
+
+hide_external_disks_on_desktop() {
+  set_default -r Finder "External disks on desktop" com.apple.finder \
+    ShowExternalHardDrivesOnDesktop bool false
+}
+
+hide_removable_media_on_desktop() {
+  set_default -r Finder "Removable media on desktop" com.apple.finder \
+    ShowRemovableMediaOnDesktop bool false
+}
+
+# --- Trackpad ----------------------------------------------------------------
+
+# Usage: set_trackpad_default LABEL KEY TYPE VALUE
+# System Settings writes each trackpad pref twice: once for the built-in
+# trackpad and once for Bluetooth trackpads (Magic Trackpad). This does the
+# same. The trackpad driver reads these at login.
+set_trackpad_default() {
+  local note="takes effect after logging out and back in"
+  set_default "$1 (built-in)" com.apple.AppleMultitouchTrackpad "$2" "$3" "$4" "$note"
+  set_default "$1 (Bluetooth)" com.apple.driver.AppleBluetoothMultitouch.trackpad \
+    "$2" "$3" "$4" "$note"
+}
+
+# Point & Click > "Tap to click" (off; the macOS default).
+disable_tap_to_click() {
+  set_trackpad_default "Tap to click" Clicking int 0
+}
+
+# Accessibility > Pointer Control > Trackpad Options > "Use trackpad for
+# dragging: Three Finger Drag" (off; the macOS default).
+disable_three_finger_drag() {
+  set_trackpad_default "Three-finger drag" TrackpadThreeFingerDrag bool false
+}
+
+# Point & Click > "Look up & data detectors": not "Tap with three fingers".
+disable_three_finger_tap_lookup() {
+  set_trackpad_default "Three-finger tap lookup" TrackpadThreeFingerTapGesture int 0
+}
+
+# Scroll & Zoom > "Zoom in or out" (pinch).
+disable_pinch_to_zoom() {
+  set_trackpad_default "Pinch to zoom" TrackpadPinch bool false
+}
+
+# Scroll & Zoom > "Smart zoom" (double-tap with two fingers).
+disable_smart_zoom() {
+  set_trackpad_default "Smart zoom" TrackpadTwoFingerDoubleTapGesture int 0
+}
+
+# Scroll & Zoom > "Rotate".
+disable_rotate_gesture() {
+  set_trackpad_default "Rotate gesture" TrackpadRotate bool false
+}
+
+# More Gestures > "Notification Center" (swipe left from the right edge).
+disable_notification_center_gesture() {
+  set_trackpad_default "Notification Center gesture" \
+    TrackpadTwoFingerFromRightEdgeSwipeGesture int 0
+}
+
+# More Gestures > pinch with thumb and three fingers (Launchpad / Apps).
+# System Settings sets both the four- and five-finger keys.
+disable_thumb_pinch_gesture() {
+  set_trackpad_default "Four-finger pinch" TrackpadFourFingerPinchGesture int 0
+  set_trackpad_default "Five-finger pinch" TrackpadFiveFingerPinchGesture int 0
+}
+
+# More Gestures > "Show Desktop" (spread thumb and three fingers). This one
+# lives in the Dock's prefs, not the trackpad's.
+disable_show_desktop_gesture() {
+  set_default -r Dock "Show Desktop gesture" com.apple.dock \
+    showDesktopGestureEnabled bool false
 }
 
 # --- Main --------------------------------------------------------------------
@@ -360,7 +584,39 @@ disable_auto_capitalize
 disable_double_space_period
 disable_smart_quotes
 disable_smart_dashes
+use_dark_mode
+show_all_extensions
+disable_minimize_on_double_click
 clear_dock
+enable_dock_autohide
+set_dock_icon_size
+hide_dock_recent_apps
+disable_rearranging_spaces
+group_windows_by_app
+disable_bottom_right_hot_corner
+disable_tiled_window_margins
+disable_edge_drag_tiling
+disable_top_edge_drag_tiling
+disable_option_drag_tiling
+hide_desktop_items
+hide_desktop_widgets
+use_finder_list_view
+set_finder_new_window_target
+show_finder_path_bar
+disable_extension_change_warning
+hide_hard_disks_on_desktop
+hide_external_disks_on_desktop
+hide_removable_media_on_desktop
+disable_tap_to_click
+disable_three_finger_drag
+disable_three_finger_tap_lookup
+disable_pinch_to_zoom
+disable_smart_zoom
+disable_rotate_gesture
+disable_notification_center_gesture
+disable_thumb_pinch_gesture
+disable_show_desktop_gesture
+restart_apps
 
 echo "All steps complete."
 
