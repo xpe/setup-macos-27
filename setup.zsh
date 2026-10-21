@@ -36,6 +36,64 @@ start_sudo() {
   keepalive_pid=$!
 }
 
+# --- Settings ----------------------------------------------------------------
+
+# Answers the user typed in, saved so later runs don't ask again. The file is
+# plain zsh (one `NAME=value` per line) and is sourced on startup; edit or
+# delete a line to change or re-ask a setting.
+SETTINGS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/setup-macos/settings.zsh"
+
+load_settings() {
+  mkdir -p "${SETTINGS_FILE:h}"  # :h is zsh for dirname
+  touch "$SETTINGS_FILE"
+  source "$SETTINGS_FILE"
+}
+
+# Usage: ask_setting NAME "Prompt" [REGEX]
+# If NAME is unset or empty, prompt until the answer is non-empty (and matches
+# REGEX, if given), then append it to the settings file. ${(P)name} reads the
+# variable whose name is in $name; ${(q)value} quotes the value so the line
+# can be sourced back safely.
+ask_setting() {
+  local name=$1 prompt=$2 regex=${3:-.} value=""
+  [[ -n "${(P)name:-}" ]] && return 0
+  while [[ -z "$value" || ! "$value" =~ $regex ]]; do
+    read -r "value?$prompt: "
+  done
+  print -r -- "$name=${(q)value}" >> "$SETTINGS_FILE"
+  typeset -g "$name=$value"
+}
+
+# Ask everything up front, so the rest of the script can run unattended.
+# (The username isn't asked: it's set in Setup Assistant before this runs.)
+ask_settings() {
+  # A valid hostname: lowercase letters, digits, hyphens; no hyphen at either end.
+  ask_setting MACHINE_NAME "Machine name (lowercase, e.g. 'worf')" \
+    '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+}
+
+# --- Machine name ------------------------------------------------------------
+
+# Sets all three of macOS's names to the same value:
+#   ComputerName  - "Name" in System Settings > General > About; AirDrop.
+#   LocalHostName - Bonjour address (NAME.local).
+#   HostName      - shown in the shell prompt; pinned so DHCP can't change it.
+set_machine_name() {
+  local kind
+  if [[ "$(scutil --get ComputerName 2>/dev/null)" == "$MACHINE_NAME" &&
+        "$(scutil --get LocalHostName 2>/dev/null)" == "$MACHINE_NAME" &&
+        "$(scutil --get HostName 2>/dev/null)" == "$MACHINE_NAME" ]]; then
+    echo "Machine name: already '$MACHINE_NAME', skipping."
+    return 0
+  fi
+
+  echo "Machine name: setting to '$MACHINE_NAME'..."
+  for kind in ComputerName LocalHostName HostName; do
+    sudo scutil --set "$kind" "$MACHINE_NAME"
+  done
+  echo "Machine name: done."
+}
+
 # --- Gallium keyboard layout -------------------------------------------------
 
 GALLIUM_DEST="/Library/Keyboard Layouts/Gallium_r5.bundle"
@@ -98,7 +156,10 @@ clear_dock() {
 
 # --- Main --------------------------------------------------------------------
 
+load_settings
+ask_settings
 start_sudo
+set_machine_name
 install_gallium
 show_input_menu
 clear_dock
