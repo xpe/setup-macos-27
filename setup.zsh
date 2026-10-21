@@ -148,9 +148,24 @@ CAPS_LOCK=30064771129  # 0x700000039
 CONTROL=30064771300    # 0x7000000E4
 MODIFIER_PREF="com.apple.keyboard.modifiermapping.0-0-0"
 
-# Writing it again is harmless, so there's no already-set check. The pref is
-# read at login, so the change takes effect after logging out and back in.
+# Usage: modifier_mapping KEYPATH
+# Prints the value at KEYPATH inside the pref (e.g. ".0.HIDKeyboardModifierMappingSrc"),
+# or nothing if it isn't set. plutil splits key paths on dots, so the dots in the
+# pref's name are escaped. For an array, plutil's raw output is its length.
+modifier_mapping() {
+  defaults -currentHost export -g - |
+    plutil -extract "${MODIFIER_PREF//./\\.}$1" raw -o - - 2>/dev/null || true
+}
+
+# The pref is read at login, so the change takes effect after logging out and back in.
 caps_lock_to_control() {
+  if [[ "$(modifier_mapping '')" == 1 &&
+        "$(modifier_mapping .0.HIDKeyboardModifierMappingSrc)" == "$CAPS_LOCK" &&
+        "$(modifier_mapping .0.HIDKeyboardModifierMappingDst)" == "$CONTROL" ]]; then
+    echo "Caps Lock: already Control, skipping."
+    return 0
+  fi
+
   echo "Caps Lock: mapping to Control..."
   defaults -currentHost write -g "$MODIFIER_PREF" -array \
     "<dict><key>HIDKeyboardModifierMappingSrc</key><integer>$CAPS_LOCK</integer><key>HIDKeyboardModifierMappingDst</key><integer>$CONTROL</integer></dict>"
