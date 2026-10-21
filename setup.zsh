@@ -6,16 +6,19 @@ set -euo pipefail
 
 # --- Cleanup ---------------------------------------------------------------
 
-# Globals: set by start_sudo / install_gallium, read by cleanup.
+# Globals: set by start_sudo / install_command_line_tools / install_gallium,
+# read by cleanup.
 # Defined empty up front so cleanup can read them under `set -u` even if
 # the script exits before they are set.
 keepalive_pid=""
 tmp=""
+clt_placeholder=""
 
-# Stop the sudo keep-alive loop and remove the temp directory, if they exist.
+# Stop the sudo keep-alive loop and remove the temp files, if they exist.
 cleanup() {
   [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null
   [[ -n "$tmp" ]] && rm -rf "$tmp"
+  [[ -n "$clt_placeholder" ]] && rm -f "$clt_placeholder"
   return 0
 }
 
@@ -70,6 +73,45 @@ ask_settings() {
   # A valid hostname: lowercase letters, digits, hyphens; no hyphen at either end.
   ask_setting MACHINE_NAME "Machine name (lowercase, e.g. 'worf')" \
     '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+}
+
+# --- Command Line Tools ------------------------------------------------------
+
+# Apple's developer tools (clang, git, make, ...). Homebrew needs them.
+CLT_DIR="/Library/Developer/CommandLineTools"
+
+# softwareupdate lists the Command Line Tools only while this file exists. It's
+# how the Homebrew installer installs them without the GUI dialog that
+# `xcode-select --install` pops up (which would need someone to click through).
+CLT_PLACEHOLDER="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress"
+
+install_command_line_tools() {
+  local label
+  if [[ -x "$CLT_DIR/usr/bin/git" ]]; then
+    echo "Command Line Tools: already installed, skipping."
+    return 0
+  fi
+
+  echo "Command Line Tools: finding latest version (can take a minute)..."
+  touch "$CLT_PLACEHOLDER"
+  clt_placeholder="$CLT_PLACEHOLDER"
+
+  # Lines look like "* Label: Command Line Tools for Xcode-16.0"; keep the
+  # newest version's label.
+  label=$(softwareupdate --list 2>&1 |
+    sed -n 's/^ *\* Label: \(Command Line Tools.*\)$/\1/p' |
+    sort -V | tail -n 1)
+  if [[ -z "$label" ]]; then
+    echo "Command Line Tools: not offered by softwareupdate." >&2
+    echo "Run 'xcode-select --install', then rerun this script." >&2
+    return 1
+  fi
+
+  echo "Command Line Tools: installing '$label'..."
+  sudo softwareupdate --install "$label"
+  # Point xcode-select at the new tools if nothing is selected yet.
+  xcode-select -p &>/dev/null || sudo xcode-select --switch "$CLT_DIR"
+  echo "Command Line Tools: done."
 }
 
 # --- Machine name ------------------------------------------------------------
@@ -202,6 +244,7 @@ clear_dock() {
 load_settings
 ask_settings
 start_sudo
+install_command_line_tools
 set_machine_name
 install_gallium
 show_input_menu
