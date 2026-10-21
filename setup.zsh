@@ -42,6 +42,68 @@ start_sudo() {
   keepalive_pid=$!
 }
 
+# --- Output ------------------------------------------------------------------
+
+# Each step reports one line, indented under a section heading, starting with
+# a mark:
+#   ·  already set
+#   +  changed
+#   *  changed; takes effect after logging out and back in
+#   >  starting (for steps whose commands print their own output or prompts)
+#   !  failed
+# The counts are printed in the summary at the end.
+unchanged_count=0
+changed_count=0
+logout_needed=0
+
+# Usage: section NAME
+section() {
+  print -r -- "$1"
+}
+
+# Usage: report MARK LABEL [VALUE]
+report() {
+  print -r -- "  $1 $2${3:+: $3}"
+}
+
+# Usage: already_set LABEL [VALUE]
+already_set() {
+  report "·" "$@"
+  (( ++unchanged_count ))
+}
+
+# Usage: changed [-l] LABEL [VALUE]
+# -l: the change takes effect after logging out and back in.
+changed() {
+  local mark="+"
+  if [[ "$1" == -l ]]; then
+    mark="*"
+    logout_needed=1
+    shift
+  fi
+  report "$mark" "$@"
+  (( ++changed_count ))
+}
+
+# Usage: starting LABEL MESSAGE
+starting() {
+  report ">" "$1" "$2..."
+}
+
+# Usage: failed LABEL MESSAGE
+failed() {
+  report "!" "$@" >&2
+}
+
+print_summary() {
+  local counts="$changed_count changed, $unchanged_count already set."
+  if (( logout_needed )); then
+    counts+=" * = after logging out and back in."
+  fi
+  print
+  print -r -- "$counts"
+}
+
 # --- Settings ----------------------------------------------------------------
 
 # Answers the user typed in, saved so later runs don't ask again. The file is
@@ -99,14 +161,17 @@ ssh_key_created=0
 # to save it in the login keychain. These are the only prompts besides sudo,
 # so this runs before the long steps.
 create_ssh_key() {
+  local note=""
+  # (D) shows the path with $HOME as ~.
   if [[ -f "$SSH_KEY" ]]; then
-    echo "SSH key: $SSH_KEY already exists, skipping."
+    already_set "Key" "${(D)SSH_KEY}"
     return 0
   fi
 
-  echo "SSH key: creating $SSH_KEY (choose a passphrase; it's saved in the keychain)..."
+  starting "Key" "creating (choose a passphrase; it's saved in the keychain)"
   mkdir -p -m 700 "$SSH_DIR"
-  ssh-keygen -t ed25519 -C "$SSH_KEY_COMMENT" -f "$SSH_KEY"
+  # -q skips the fingerprint and randomart; it still asks for the passphrase.
+  ssh-keygen -q -t ed25519 -C "$SSH_KEY_COMMENT" -f "$SSH_KEY"
   ssh_key_created=1
 
   # Load the key into the agent and save its passphrase in the keychain. The
@@ -114,11 +179,11 @@ create_ssh_key() {
   # runs over SSH. Then the AddKeysToAgent and UseKeychain lines written by
   # write_ssh_config do the same on the key's first use.
   if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
-    ssh-add --apple-use-keychain "$SSH_KEY"
+    ssh-add -q --apple-use-keychain "$SSH_KEY"
   else
-    echo "SSH key: no ssh-agent; the passphrase is saved to the keychain on first use."
+    note=" (no ssh-agent; the passphrase is saved to the keychain on first use)"
   fi
-  echo "SSH key: done."
+  changed "Key" "${(D)SSH_KEY}$note"
 }
 
 # A hardened client config for all hosts: modern algorithms only, one key,
@@ -128,11 +193,10 @@ create_ssh_key() {
 # compare it with this one by hand.
 write_ssh_config() {
   if [[ -e "$SSH_CONFIG" ]]; then
-    echo "SSH config: $SSH_CONFIG already exists, skipping."
+    already_set "Config" "${(D)SSH_CONFIG}"
     return 0
   fi
 
-  echo "SSH config: writing $SSH_CONFIG..."
   mkdir -p -m 700 "$SSH_DIR"
   # The quoted 'EOF' writes the text as is, with no $ expansion.
   cat > "$SSH_CONFIG" <<'EOF'
@@ -204,7 +268,7 @@ Host *
     ServerAliveCountMax 3
 EOF
   chmod 600 "$SSH_CONFIG"
-  echo "SSH config: done."
+  changed "Config" "${(D)SSH_CONFIG}"
 }
 
 # --- Command Line Tools ------------------------------------------------------
@@ -220,12 +284,12 @@ CLT_PLACEHOLDER="/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 install_command_line_tools() {
   local label
   if [[ -x "$CLT_DIR/usr/bin/git" ]]; then
-    echo "Command Line Tools: already installed, skipping."
+    already_set "Command Line Tools" "installed"
     return 0
   fi
 
+  starting "Command Line Tools" "installing (finding the latest version can take a minute)"
   start_sudo
-  echo "Command Line Tools: finding latest version (can take a minute)..."
   touch "$CLT_PLACEHOLDER"
   clt_placeholder="$CLT_PLACEHOLDER"
 
@@ -235,16 +299,15 @@ install_command_line_tools() {
     sed -n 's/^ *\* Label: \(Command Line Tools.*\)$/\1/p' |
     sort -V | tail -n 1)
   if [[ -z "$label" ]]; then
-    echo "Command Line Tools: not offered by softwareupdate." >&2
-    echo "Run 'xcode-select --install', then rerun this script." >&2
+    failed "Command Line Tools" \
+      "not offered by softwareupdate; run 'xcode-select --install', then rerun this script"
     return 1
   fi
 
-  echo "Command Line Tools: installing '$label'..."
   sudo softwareupdate --install "$label"
   # Point xcode-select at the new tools if nothing is selected yet.
   xcode-select -p &>/dev/null || sudo xcode-select --switch "$CLT_DIR"
-  echo "Command Line Tools: done."
+  changed "Command Line Tools" "installed"
 }
 
 # --- Homebrew ----------------------------------------------------------------
@@ -256,17 +319,17 @@ BREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/instal
 install_homebrew() {
   local installer
   if [[ -x "$BREW" ]]; then
-    echo "Homebrew: already installed, skipping."
+    already_set "Homebrew" "installed"
   else
+    starting "Homebrew" "installing"
     start_sudo
-    echo "Homebrew: installing..."
     # Download first, so a failed download stops the script (a failing
     # $(curl ...) inside a command's arguments wouldn't).
     installer=$(curl -fsSL "$BREW_INSTALL_URL")
     # NONINTERACTIVE skips the "Press RETURN" prompt. The installer needs sudo;
     # it uses the credentials cached by start_sudo.
     NONINTERACTIVE=1 /bin/bash -c "$installer"
-    echo "Homebrew: done."
+    changed "Homebrew" "installed"
   fi
   # Put brew on PATH for the rest of this script.
   eval "$("$BREW" shellenv)"
@@ -283,16 +346,15 @@ set_machine_name() {
   if [[ "$(scutil --get ComputerName 2>/dev/null)" == "$MACHINE_NAME" &&
         "$(scutil --get LocalHostName 2>/dev/null)" == "$MACHINE_NAME" &&
         "$(scutil --get HostName 2>/dev/null)" == "$MACHINE_NAME" ]]; then
-    echo "Machine name: already '$MACHINE_NAME', skipping."
+    already_set "Machine name" "$MACHINE_NAME"
     return 0
   fi
 
   start_sudo
-  echo "Machine name: setting to '$MACHINE_NAME'..."
   for kind in ComputerName LocalHostName HostName; do
     sudo scutil --set "$kind" "$MACHINE_NAME"
   done
-  echo "Machine name: done."
+  changed "Machine name" "$MACHINE_NAME"
 }
 
 # --- Gallium keyboard layout -------------------------------------------------
@@ -305,12 +367,11 @@ gallium_installed=0
 
 install_gallium() {
   if [[ -d "$GALLIUM_DEST" ]]; then
-    echo "Gallium: already installed, skipping."
+    already_set "Gallium layout" "installed"
     return 0
   fi
 
   start_sudo
-  echo "Gallium: installing..."
   tmp=$(mktemp -d)
 
   # -f fail on HTTP error, -sS quiet but show errors, -L follow redirects.
@@ -322,7 +383,8 @@ install_gallium() {
   # The zip has Gallium_r5.bundle at its top level.
   sudo cp -R "$tmp/unzipped/Gallium_r5.bundle" "/Library/Keyboard Layouts/"
   gallium_installed=1
-  echo "Gallium: done."
+  # -l: macOS doesn't see the layout until after logging out and back in.
+  changed -l "Gallium layout" "installed"
 }
 
 # --- Input sources -----------------------------------------------------------
@@ -331,12 +393,10 @@ install_gallium() {
 # macOS doesn't see a newly installed layout until after logout, and the
 # AppleEnabledInputSources pref isn't a reliable record of what's enabled.
 
-# Show the input menu (layout switcher) in the menu bar.
+# Show the input menu (layout switcher) in the menu bar. Restarting the menu
+# agent applies it.
 show_input_menu() {
-  echo "Input menu: showing in menu bar..."
-  defaults write com.apple.TextInputMenu visible -bool true
-  killall TextInputMenuAgent 2>/dev/null || true  # restarts the menu agent
-  echo "Input menu: done."
+  set_default -r TextInputMenuAgent "Input menu" com.apple.TextInputMenu visible bool true
 }
 
 # --- Caps Lock -> Control ----------------------------------------------------
@@ -364,11 +424,10 @@ caps_lock_to_control() {
   if [[ "$(modifier_mapping '')" == 1 &&
         "$(modifier_mapping .0.HIDKeyboardModifierMappingSrc)" == "$CAPS_LOCK" &&
         "$(modifier_mapping .0.HIDKeyboardModifierMappingDst)" == "$CONTROL" ]]; then
-    echo "Caps Lock: already Control, skipping."
+    already_set "Caps Lock" "Control"
     return 0
   fi
 
-  echo "Caps Lock: mapping to Control..."
   # Write through `defaults`, which goes via cfprefsd (the prefs daemon). Editing
   # the plist file directly (plutil, PlistBuddy) is the fragile route: cfprefsd
   # caches prefs and can ignore or overwrite such edits. `defaults import` is no
@@ -379,7 +438,7 @@ caps_lock_to_control() {
   # System Settings writes.
   defaults -currentHost write -g "$MODIFIER_PREF" -array \
     "<dict><key>HIDKeyboardModifierMappingSrc</key><integer>$CAPS_LOCK</integer><key>HIDKeyboardModifierMappingDst</key><integer>$CONTROL</integer></dict>"
-  echo "Caps Lock: done (takes effect after logging out and back in)."
+  changed -l "Caps Lock" "Control"
 }
 
 # --- Preferences -------------------------------------------------------------
@@ -388,40 +447,88 @@ caps_lock_to_control() {
 # typeset -U keeps the array's entries unique.
 typeset -U apps_to_restart=()
 
-# Usage: set_default [-r APP] LABEL DOMAIN KEY TYPE VALUE [NOTE]
+# Usage: shown_value TYPE VALUE
+# Prints a pref's value as the report shows it: a bool (true/false, or 1/0 as
+# `defaults read` prints it) as on/off, and an empty VALUE as "unset".
+shown_value() {
+  local type=$1 value=$2
+  if [[ -z "$value" ]]; then
+    value=unset
+  elif [[ "$type" == bool ]]; then
+    case "$value" in
+      true|1) value=on ;;
+      false|0) value=off ;;
+    esac
+  fi
+  print -r -- "$value"
+}
+
+# Usage: write_default DOMAIN KEY TYPE VALUE
 # Writes one pref with `defaults write DOMAIN KEY -TYPE VALUE`, unless it
 # already holds VALUE. `defaults read` prints booleans as 1/0, so -bool values
-# are compared in that form. With -r, APP is restarted at the end of the run if
-# the pref was written. NOTE, if given, is appended to the done message.
+# are compared in that form. Sets REPLY to the old value (as shown_value
+# prints it) if the pref was written, or to "" if it wasn't.
+write_default() {
+  local domain=$1 key=$2 type=$3 value=$4 expected=$4 current
+  if [[ "$type" == bool ]]; then
+    [[ "$value" == true ]] && expected=1 || expected=0
+  fi
+  current=$(defaults read "$domain" "$key" 2>/dev/null || true)
+  REPLY=""
+  [[ "$current" == "$expected" ]] && return 0
+
+  defaults write "$domain" "$key" "-$type" "$value"
+  REPLY=$(shown_value "$type" "$current")
+}
+
+# Usage: report_default [-l] LABEL OLD TYPE VALUE [SHOWN]
+# Reports a pref as already set (OLD is "") or changed (OLD -> new value).
+# SHOWN is how VALUE is shown (default: as shown_value prints it). -l is
+# passed to `changed`.
+report_default() {
+  local flags=()
+  if [[ "$1" == -l ]]; then
+    flags=(-l)
+    shift
+  fi
+  local label=$1 old=$2 type=$3 value=$4 shown=${5:-}
+  [[ -n "$shown" ]] || shown=$(shown_value "$type" "$value")
+  if [[ -z "$old" ]]; then
+    already_set "$label" "$shown"
+  else
+    changed "${flags[@]}" "$label" "$old -> $shown"
+  fi
+}
+
+# Usage: set_default [-r APP] [-l] LABEL DOMAIN KEY TYPE VALUE [SHOWN]
+# Writes one pref (see write_default) and reports it (see report_default).
+# With -r, APP is restarted at the end of the run if the pref was written. -l
+# marks a change that takes effect after logging out and back in.
 set_default() {
-  local app=""
+  local app="" flags=()
   if [[ "$1" == -r ]]; then
     app=$2
     shift 2
   fi
-  local label=$1 domain=$2 key=$3 type=$4 value=$5 note=${6:-} expected=$5
-  if [[ "$type" == bool ]]; then
-    [[ "$value" == true ]] && expected=1 || expected=0
+  if [[ "$1" == -l ]]; then
+    flags=(-l)
+    shift
   fi
-  if [[ "$(defaults read "$domain" "$key" 2>/dev/null)" == "$expected" ]]; then
-    echo "$label: already $value, skipping."
-    return 0
-  fi
-
-  echo "$label: setting to $value..."
-  defaults write "$domain" "$key" "-$type" "$value"
-  [[ -n "$app" ]] && apps_to_restart+=("$app")
-  echo "$label: done${note:+ ($note)}."
+  local label=$1 domain=$2 key=$3 type=$4 value=$5 shown=${6:-}
+  write_default "$domain" "$key" "$type" "$value"
+  [[ -n "$REPLY" && -n "$app" ]] && apps_to_restart+=("$app")
+  report_default "${flags[@]}" "$label" "$REPLY" "$type" "$value" "$shown"
 }
 
-# Restart each app in apps_to_restart. Dock and Finder relaunch on their own
-# when killed.
+# Restart each app in apps_to_restart. Dock, Finder and TextInputMenuAgent
+# relaunch on their own when killed.
 restart_apps() {
   local app
+  (( ${#apps_to_restart} )) || return 0
   for app in "${apps_to_restart[@]}"; do
-    echo "$app: restarting so changes take effect..."
     killall "$app" 2>/dev/null || true
   done
+  print -r -- "Restarted: ${(j:, :)apps_to_restart}"
 }
 
 # --- Keyboard and text -------------------------------------------------------
@@ -429,27 +536,25 @@ restart_apps() {
 # System Settings > Keyboard > Key repeat rate. Lower is faster; 2 is the
 # fastest step on the slider (about 30 ms between repeats).
 set_key_repeat_rate() {
-  set_default "Key repeat rate" -g KeyRepeat int 2 \
-    "takes effect after logging out and back in"
+  set_default -l "Key repeat rate" -g KeyRepeat int 2
 }
 
 # System Settings > Keyboard > Delay until repeat. 25 is the second-shortest
 # step on the slider (about 375 ms).
 set_key_repeat_delay() {
-  set_default "Key repeat delay" -g InitialKeyRepeat int 25 \
-    "takes effect after logging out and back in"
+  set_default -l "Key repeat delay" -g InitialKeyRepeat int 25
 }
 
 # System Settings > Keyboard > Keyboard Shortcuts > Function Keys >
 # "Use F1, F2, etc. keys as standard function keys". Hold Fn for brightness,
 # volume, etc.
 use_standard_function_keys() {
-  set_default "Function keys" -g com.apple.keyboard.fnState bool true
+  set_default "Standard function keys" -g com.apple.keyboard.fnState bool true
 }
 
 # System Settings > Keyboard > "Press 🌐 key to": 0 is Do Nothing.
 set_globe_key_action() {
-  set_default "Globe key" com.apple.HIToolbox AppleFnUsageType int 0
+  set_default "Globe key" com.apple.HIToolbox AppleFnUsageType int 0 "Do Nothing"
 }
 
 # System Settings > Keyboard > Text Input > Input Sources > Edit... : the
@@ -481,29 +586,28 @@ clear_dock() {
   local current
   current=$(defaults read com.apple.dock persistent-apps 2>/dev/null || true)
   if [[ "$current" == $'(\n)' ]]; then
-    echo "Dock: already empty, skipping."
+    already_set "Pinned apps" "none"
     return 0
   fi
 
-  echo "Dock: clearing pinned apps..."
   defaults write com.apple.dock persistent-apps -array
   apps_to_restart+=(Dock)
-  echo "Dock: done."
+  changed "Pinned apps" "none"
 }
 
 # System Settings > Desktop & Dock > "Automatically hide and show the Dock".
 enable_dock_autohide() {
-  set_default -r Dock "Dock auto-hide" com.apple.dock autohide bool true
+  set_default -r Dock "Auto-hide" com.apple.dock autohide bool true
 }
 
 # System Settings > Desktop & Dock > Size. Stored as a float, in points.
 set_dock_icon_size() {
-  set_default -r Dock "Dock icon size" com.apple.dock tilesize float 48
+  set_default -r Dock "Icon size" com.apple.dock tilesize float 48
 }
 
 # System Settings > Desktop & Dock > "Show suggested and recent apps in Dock".
 hide_dock_recent_apps() {
-  set_default -r Dock "Dock recent apps" com.apple.dock show-recents bool false
+  set_default -r Dock "Recent apps" com.apple.dock show-recents bool false
 }
 
 # System Settings > Desktop & Dock > Mission Control > "Automatically rearrange
@@ -521,8 +625,9 @@ group_windows_by_app() {
 # System Settings > Desktop & Dock > Hot Corners: bottom right. Action 1 is
 # "-" (no action); modifier 0 is no modifier key. The default is Quick Note.
 disable_bottom_right_hot_corner() {
-  set_default -r Dock "Bottom-right hot corner" com.apple.dock wvous-br-corner int 1
-  set_default -r Dock "Bottom-right hot corner modifier" com.apple.dock wvous-br-modifier int 0
+  set_default -r Dock "Bottom-right hot corner" com.apple.dock wvous-br-corner int 1 none
+  set_default -r Dock "Bottom-right hot corner modifier" com.apple.dock \
+    wvous-br-modifier int 0 none
 }
 
 # --- Appearance --------------------------------------------------------------
@@ -530,8 +635,7 @@ disable_bottom_right_hot_corner() {
 # System Settings > Appearance > Dark. Apps already open switch after logging
 # out and back in.
 use_dark_mode() {
-  set_default "Dark mode" -g AppleInterfaceStyle string Dark \
-    "takes effect after logging out and back in"
+  set_default -l "Dark mode" -g AppleInterfaceStyle string Dark on
 }
 
 # Finder > Settings > Advanced > "Show all filename extensions".
@@ -548,62 +652,60 @@ disable_minimize_on_double_click() {
 # --- Desktop and window tiling -----------------------------------------------
 
 # System Settings > Desktop & Dock > Windows. The WindowManager prefs are
-# picked up after logging out and back in.
-WINDOW_MANAGER_NOTE="takes effect after logging out and back in"
+# picked up after logging out and back in (hence -l).
 
 # "Tiled windows have margins".
 disable_tiled_window_margins() {
-  set_default "Tiled window margins" com.apple.WindowManager \
-    EnableTiledWindowMargins bool false "$WINDOW_MANAGER_NOTE"
+  set_default -l "Tiled window margins" com.apple.WindowManager \
+    EnableTiledWindowMargins bool false
 }
 
 # "Drag windows to screen edges to tile".
 disable_edge_drag_tiling() {
-  set_default "Tile by dragging to edges" com.apple.WindowManager \
-    EnableTilingByEdgeDrag bool false "$WINDOW_MANAGER_NOTE"
+  set_default -l "Tile by dragging to edges" com.apple.WindowManager \
+    EnableTilingByEdgeDrag bool false
 }
 
 # "Drag windows to menu bar to fill screen".
 disable_top_edge_drag_tiling() {
-  set_default "Fill by dragging to menu bar" com.apple.WindowManager \
-    EnableTopTilingByEdgeDrag bool false "$WINDOW_MANAGER_NOTE"
+  set_default -l "Fill by dragging to menu bar" com.apple.WindowManager \
+    EnableTopTilingByEdgeDrag bool false
 }
 
 # "Hold ⌥ key while dragging windows to tile".
 disable_option_drag_tiling() {
-  set_default "Tile by Option-dragging" com.apple.WindowManager \
-    EnableTilingOptionAccelerator bool false "$WINDOW_MANAGER_NOTE"
+  set_default -l "Tile by Option-dragging" com.apple.WindowManager \
+    EnableTilingOptionAccelerator bool false
 }
 
 # System Settings > Desktop & Dock > Desktop & Stage Manager > Show Items >
 # "On Desktop" (off).
 hide_desktop_items() {
-  set_default "Desktop items" com.apple.WindowManager \
-    HideDesktop bool true "$WINDOW_MANAGER_NOTE"
+  set_default -l "Hide desktop items" com.apple.WindowManager HideDesktop bool true
 }
 
 # System Settings > Desktop & Dock > Desktop & Stage Manager > Show Widgets >
 # "On Desktop" (off).
 hide_desktop_widgets() {
-  set_default "Desktop widgets" com.apple.WindowManager \
-    StandardHideWidgets bool true "$WINDOW_MANAGER_NOTE"
+  set_default -l "Hide desktop widgets" com.apple.WindowManager \
+    StandardHideWidgets bool true
 }
 
 # --- Finder ------------------------------------------------------------------
 
 # View > as List. Folders that already have a saved view keep it.
 use_finder_list_view() {
-  set_default -r Finder "Finder list view" com.apple.finder FXPreferredViewStyle string Nlsv
+  set_default -r Finder "Default view" com.apple.finder FXPreferredViewStyle string Nlsv list
 }
 
 # Finder > Settings > General > "New Finder windows show": Recents (PfAF).
 set_finder_new_window_target() {
-  set_default -r Finder "Finder new window target" com.apple.finder NewWindowTarget string PfAF
+  set_default -r Finder "New windows show" com.apple.finder NewWindowTarget string PfAF Recents
 }
 
 # View > Show Path Bar.
 show_finder_path_bar() {
-  set_default -r Finder "Finder path bar" com.apple.finder ShowPathbar bool true
+  set_default -r Finder "Path bar" com.apple.finder ShowPathbar bool true
 }
 
 # Finder > Settings > Advanced > "Show warning before changing an extension".
@@ -630,20 +732,23 @@ hide_removable_media_on_desktop() {
 
 # --- Trackpad ----------------------------------------------------------------
 
-# Usage: set_trackpad_default LABEL KEY TYPE VALUE
+# Usage: set_trackpad_default LABEL KEY TYPE VALUE [SHOWN]
 # System Settings writes each trackpad pref twice: once for the built-in
 # trackpad and once for Bluetooth trackpads (Magic Trackpad). This does the
-# same. The trackpad driver reads these at login.
+# same, and reports both as one line (see report_default). The trackpad driver
+# reads these at login.
 set_trackpad_default() {
-  local note="takes effect after logging out and back in"
-  set_default "$1 (built-in)" com.apple.AppleMultitouchTrackpad "$2" "$3" "$4" "$note"
-  set_default "$1 (Bluetooth)" com.apple.driver.AppleBluetoothMultitouch.trackpad \
-    "$2" "$3" "$4" "$note"
+  local label=$1 key=$2 type=$3 value=$4 shown=${5:-} old
+  write_default com.apple.AppleMultitouchTrackpad "$key" "$type" "$value"
+  old=$REPLY
+  write_default com.apple.driver.AppleBluetoothMultitouch.trackpad "$key" "$type" "$value"
+  # The built-in trackpad's old value, unless only the Bluetooth one was written.
+  report_default -l "$label" "${old:-$REPLY}" "$type" "$value" "$shown"
 }
 
 # Point & Click > "Tap to click" (off; the macOS default).
 disable_tap_to_click() {
-  set_trackpad_default "Tap to click" Clicking int 0
+  set_trackpad_default "Tap to click" Clicking int 0 off
 }
 
 # Accessibility > Pointer Control > Trackpad Options > "Use trackpad for
@@ -654,7 +759,7 @@ disable_three_finger_drag() {
 
 # Point & Click > "Look up & data detectors": not "Tap with three fingers".
 disable_three_finger_tap_lookup() {
-  set_trackpad_default "Three-finger tap lookup" TrackpadThreeFingerTapGesture int 0
+  set_trackpad_default "Three-finger tap lookup" TrackpadThreeFingerTapGesture int 0 off
 }
 
 # Scroll & Zoom > "Zoom in or out" (pinch).
@@ -664,7 +769,7 @@ disable_pinch_to_zoom() {
 
 # Scroll & Zoom > "Smart zoom" (double-tap with two fingers).
 disable_smart_zoom() {
-  set_trackpad_default "Smart zoom" TrackpadTwoFingerDoubleTapGesture int 0
+  set_trackpad_default "Smart zoom" TrackpadTwoFingerDoubleTapGesture int 0 off
 }
 
 # Scroll & Zoom > "Rotate".
@@ -675,14 +780,14 @@ disable_rotate_gesture() {
 # More Gestures > "Notification Center" (swipe left from the right edge).
 disable_notification_center_gesture() {
   set_trackpad_default "Notification Center gesture" \
-    TrackpadTwoFingerFromRightEdgeSwipeGesture int 0
+    TrackpadTwoFingerFromRightEdgeSwipeGesture int 0 off
 }
 
 # More Gestures > pinch with thumb and three fingers (Launchpad / Apps).
 # System Settings sets both the four- and five-finger keys.
 disable_thumb_pinch_gesture() {
-  set_trackpad_default "Four-finger pinch" TrackpadFourFingerPinchGesture int 0
-  set_trackpad_default "Five-finger pinch" TrackpadFiveFingerPinchGesture int 0
+  set_trackpad_default "Four-finger pinch" TrackpadFourFingerPinchGesture int 0 off
+  set_trackpad_default "Five-finger pinch" TrackpadFiveFingerPinchGesture int 0 off
 }
 
 # More Gestures > "Show Desktop" (spread thumb and three fingers). This one
@@ -699,26 +804,32 @@ ask_settings
 # The steps that prompt (for the SSH passphrase, or for sudo) run first, so on
 # a new machine the prompts come right away and the rest of the run is
 # unattended.
+section "SSH"
 create_ssh_key
 write_ssh_config
+section "System"
 set_machine_name
 install_gallium
 install_command_line_tools
 install_homebrew
+section "Keyboard"
 show_input_menu
 caps_lock_to_control
 set_key_repeat_rate
 set_key_repeat_delay
 use_standard_function_keys
 set_globe_key_action
+section "Text"
 disable_auto_correct
 disable_auto_capitalize
 disable_double_space_period
 disable_smart_quotes
 disable_smart_dashes
+section "Appearance"
 use_dark_mode
 show_all_extensions
 disable_minimize_on_double_click
+section "Dock"
 clear_dock
 enable_dock_autohide
 set_dock_icon_size
@@ -726,12 +837,14 @@ hide_dock_recent_apps
 disable_rearranging_spaces
 group_windows_by_app
 disable_bottom_right_hot_corner
+section "Desktop and windows"
 disable_tiled_window_margins
 disable_edge_drag_tiling
 disable_top_edge_drag_tiling
 disable_option_drag_tiling
 hide_desktop_items
 hide_desktop_widgets
+section "Finder"
 use_finder_list_view
 set_finder_new_window_target
 show_finder_path_bar
@@ -739,6 +852,7 @@ disable_extension_change_warning
 hide_hard_disks_on_desktop
 hide_external_disks_on_desktop
 hide_removable_media_on_desktop
+section "Trackpad"
 disable_tap_to_click
 disable_three_finger_drag
 disable_three_finger_tap_lookup
@@ -748,9 +862,8 @@ disable_rotate_gesture
 disable_notification_center_gesture
 disable_thumb_pinch_gesture
 disable_show_desktop_gesture
+print_summary
 restart_apps
-
-echo "All steps complete."
 
 if (( gallium_installed )); then
   cat <<'EOF'
