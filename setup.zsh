@@ -31,7 +31,6 @@ trap 'exit 130' INT TERM
 start_sudo() {
   # Prompt for the password once.
   sudo -v
-
   # Refresh sudo's cached credentials every 60s in the background.
   while true; do sudo -n true; sleep 60; done 2>/dev/null &
   keepalive_pid=$!
@@ -41,6 +40,9 @@ start_sudo() {
 
 GALLIUM_DEST="/Library/Keyboard Layouts/Gallium_r5.bundle"
 GALLIUM_URL="https://github.com/xpe/gallium/raw/trunk/macOS/Gallium_r5.bundle.zip"
+
+# Set to 1 by install_gallium when it installs; gates the manual-step message.
+gallium_installed=0
 
 install_gallium() {
   if [[ -d "$GALLIUM_DEST" ]]; then
@@ -57,13 +59,24 @@ install_gallium() {
   # ditto: Apple's unzipper; preserves macOS file metadata. -x extract, -k zip.
   ditto -x -k "$tmp/gallium.zip" "$tmp/unzipped"
 
-  # The bundle may be at the top of the zip or one folder down.
-  local bundle
-  bundle=$(find "$tmp/unzipped" -maxdepth 2 -type d -name 'Gallium_r5.bundle' | head -n 1)
-  [[ -n "$bundle" ]] || { echo "Gallium_r5.bundle not found in zip" >&2; exit 1; }
-
-  sudo cp -R "$bundle" "/Library/Keyboard Layouts/"
+  # The zip has Gallium_r5.bundle at its top level.
+  sudo cp -R "$tmp/unzipped/Gallium_r5.bundle" "/Library/Keyboard Layouts/"
+  gallium_installed=1
   echo "Gallium: done."
+}
+
+# --- Input sources -----------------------------------------------------------
+
+# Enabling Gallium as an input source is left to the user (see end of script):
+# macOS doesn't see a newly installed layout until after logout, and the
+# AppleEnabledInputSources pref isn't a reliable record of what's enabled.
+
+# Show the input menu (layout switcher) in the menu bar.
+show_input_menu() {
+  echo "Input menu: showing in menu bar..."
+  defaults write com.apple.TextInputMenu visible -bool true
+  killall TextInputMenuAgent 2>/dev/null || true  # restarts the menu agent
+  echo "Input menu: done."
 }
 
 # --- Dock --------------------------------------------------------------------
@@ -87,5 +100,17 @@ clear_dock() {
 
 start_sudo
 install_gallium
+show_input_menu
 clear_dock
+
 echo "All steps complete."
+
+if (( gallium_installed )); then
+  cat <<'EOF'
+
+The Gallium keyboard layout was just installed. To enable it:
+  1. Log out and back in.
+  2. System Settings > Keyboard > Text Input > Input Sources > Edit...
+  3. Click +, find Gallium, click Add.
+EOF
+fi
