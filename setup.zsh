@@ -31,7 +31,10 @@ trap 'exit 130' INT TERM
 
 # --- sudo --------------------------------------------------------------------
 
+# Called by each step that needs sudo, just before its first use, so a run
+# where those steps all skip never asks for a password.
 start_sudo() {
+  [[ -n "$keepalive_pid" ]] && return 0  # already started
   # Prompt for the password once.
   sudo -v
   # Refresh sudo's cached credentials every 60s in the background.
@@ -92,6 +95,7 @@ install_command_line_tools() {
     return 0
   fi
 
+  start_sudo
   echo "Command Line Tools: finding latest version (can take a minute)..."
   touch "$CLT_PLACEHOLDER"
   clt_placeholder="$CLT_PLACEHOLDER"
@@ -125,6 +129,7 @@ install_homebrew() {
   if [[ -x "$BREW" ]]; then
     echo "Homebrew: already installed, skipping."
   else
+    start_sudo
     echo "Homebrew: installing..."
     # Download first, so a failed download stops the script (a failing
     # $(curl ...) inside a command's arguments wouldn't).
@@ -153,6 +158,7 @@ set_machine_name() {
     return 0
   fi
 
+  start_sudo
   echo "Machine name: setting to '$MACHINE_NAME'..."
   for kind in ComputerName LocalHostName HostName; do
     sudo scutil --set "$kind" "$MACHINE_NAME"
@@ -174,6 +180,7 @@ install_gallium() {
     return 0
   fi
 
+  start_sudo
   echo "Gallium: installing..."
   tmp=$(mktemp -d)
 
@@ -336,11 +343,12 @@ clear_dock() {
 
 load_settings
 ask_settings
-start_sudo
-install_command_line_tools
-install_homebrew
+# The steps that may need sudo run first, so on a new machine the password
+# prompt comes right away and the rest of the run is unattended.
 set_machine_name
 install_gallium
+install_command_line_tools
+install_homebrew
 show_input_menu
 caps_lock_to_control
 set_key_repeat_rate
