@@ -246,6 +246,75 @@ caps_lock_to_control() {
   echo "Caps Lock: done (takes effect after logging out and back in)."
 }
 
+# --- Keyboard and text -------------------------------------------------------
+
+# Usage: set_default LABEL DOMAIN KEY TYPE VALUE [NOTE]
+# Writes one pref with `defaults write DOMAIN KEY -TYPE VALUE`, unless it
+# already holds VALUE. `defaults read` prints booleans as 1/0, so -bool values
+# are compared in that form. NOTE, if given, is appended to the done message.
+set_default() {
+  local label=$1 domain=$2 key=$3 type=$4 value=$5 note=${6:-} expected=$5
+  if [[ "$type" == bool ]]; then
+    [[ "$value" == true ]] && expected=1 || expected=0
+  fi
+  if [[ "$(defaults read "$domain" "$key" 2>/dev/null)" == "$expected" ]]; then
+    echo "$label: already $value, skipping."
+    return 0
+  fi
+
+  echo "$label: setting to $value..."
+  defaults write "$domain" "$key" "-$type" "$value"
+  echo "$label: done${note:+ ($note)}."
+}
+
+# System Settings > Keyboard > Key repeat rate. Lower is faster; 2 is the
+# fastest step on the slider (about 30 ms between repeats).
+set_key_repeat_rate() {
+  set_default "Key repeat rate" -g KeyRepeat int 2 \
+    "takes effect after logging out and back in"
+}
+
+# System Settings > Keyboard > Delay until repeat. 25 is the second-shortest
+# step on the slider (about 375 ms).
+set_key_repeat_delay() {
+  set_default "Key repeat delay" -g InitialKeyRepeat int 25 \
+    "takes effect after logging out and back in"
+}
+
+# System Settings > Keyboard > Keyboard Shortcuts > Function Keys >
+# "Use F1, F2, etc. keys as standard function keys". Hold Fn for brightness,
+# volume, etc.
+use_standard_function_keys() {
+  set_default "Function keys" -g com.apple.keyboard.fnState bool true
+}
+
+# System Settings > Keyboard > "Press 🌐 key to": 0 is Do Nothing.
+set_globe_key_action() {
+  set_default "Globe key" com.apple.HIToolbox AppleFnUsageType int 0
+}
+
+# System Settings > Keyboard > Text Input > Input Sources > Edit... : the
+# toggles below.
+disable_auto_correct() {
+  set_default "Auto-correct" -g NSAutomaticSpellingCorrectionEnabled bool false
+}
+
+disable_auto_capitalize() {
+  set_default "Auto-capitalize" -g NSAutomaticCapitalizationEnabled bool false
+}
+
+disable_double_space_period() {
+  set_default "Double-space period" -g NSAutomaticPeriodSubstitutionEnabled bool false
+}
+
+disable_smart_quotes() {
+  set_default "Smart quotes" -g NSAutomaticQuoteSubstitutionEnabled bool false
+}
+
+disable_smart_dashes() {
+  set_default "Smart dashes" -g NSAutomaticDashSubstitutionEnabled bool false
+}
+
 # --- Dock --------------------------------------------------------------------
 
 clear_dock() {
@@ -274,6 +343,15 @@ set_machine_name
 install_gallium
 show_input_menu
 caps_lock_to_control
+set_key_repeat_rate
+set_key_repeat_delay
+use_standard_function_keys
+set_globe_key_action
+disable_auto_correct
+disable_auto_capitalize
+disable_double_space_period
+disable_smart_quotes
+disable_smart_dashes
 clear_dock
 
 echo "All steps complete."
