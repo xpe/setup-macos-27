@@ -610,9 +610,11 @@ install_karabiner() {
   fi
 
   starting "App" "installing"
-  # The installer package needs sudo; brew uses the credentials cached by
-  # start_sudo.
-  start_sudo
+  # The installer package needs sudo, which brew asks for itself. There's no
+  # start_sudo here: before using sudo, brew clears its cached password (on
+  # purpose, so nothing it runs gets sudo unasked), so start_sudo's would only
+  # be asked for and thrown away. For the same reason, a sudo step after this
+  # one asks for the password again.
   brew install --cask karabiner-elements
   changed "App" "installed"
 }
