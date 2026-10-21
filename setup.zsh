@@ -50,7 +50,7 @@ start_sudo() {
 #   +  changed
 #   *  changed; takes effect after logging out and back in
 #   >  starting (for steps whose commands print their own output or prompts)
-#   !  failed
+#   !  failed, or not working yet
 # The counts are printed in the summary at the end.
 unchanged_count=0
 changed_count=0
@@ -399,8 +399,266 @@ show_input_menu() {
   set_default -r TextInputMenuAgent "Input menu" com.apple.TextInputMenu visible bool true
 }
 
+# --- Karabiner-Elements ------------------------------------------------------
+
+# Karabiner-Elements remaps keys on every keyboard, built-in or external. The
+# Homebrew cask runs Karabiner's own installer package; after that, Karabiner
+# updates itself.
+KARABINER_APP="/Applications/Karabiner-Elements.app"
+KARABINER_CLI="/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_cli"
+KARABINER_JSON="$HOME/.config/karabiner/karabiner.json"
+
+# Set by check_karabiner to what Karabiner still needs, or "" when it's
+# working; gates the setup message at the end.
+karabiner_needs=""
+
+# The config these Macs share. Its rules:
+#   Caps Lock: Control when held with another key, Escape when tapped alone.
+#   Shift-Escape: Caps Lock.
+#   Return: Control when held with another key, Return when tapped alone.
+#   Comma: a symbol layer (turned off).
+# No device is named, so the rules apply to every keyboard. keyboard_type_v2
+# answers the keyboard-type question in Karabiner's setup.
+karabiner_config() {
+  cat <<'EOF'
+{
+    "profiles": [
+        {
+            "complex_modifications": {
+                "rules": [
+                    {
+                        "description": "Change caps_lock to control if pressed with other keys, to escape if pressed alone.",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "caps_lock",
+                                    "modifiers": { "optional": ["any"] }
+                                },
+                                "to": [{ "key_code": "left_control" }],
+                                "to_if_alone": [{ "key_code": "escape" }],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "Change shift + escape to caps_lock.",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "escape",
+                                    "modifiers": {
+                                        "mandatory": ["shift"],
+                                        "optional": ["caps_lock"]
+                                    }
+                                },
+                                "to": [{ "key_code": "caps_lock" }],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "Change return_or_enter to control if pressed with other keys, to return if pressed alone.",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "return_or_enter",
+                                    "modifiers": { "optional": ["any"] }
+                                },
+                                "to": [{ "key_code": "right_control" }],
+                                "to_if_alone": [{ "key_code": "return_or_enter" }],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "Symbol layer: backslash pipe backtick tilde",
+                        "enabled": false,
+                        "manipulators": [
+                            {
+                                "conditions": [
+                                    {
+                                        "name": "symbol_layer",
+                                        "type": "variable_if",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": { "key_code": "a" },
+                                "to": [{ "key_code": "backslash" }],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "name": "symbol_layer",
+                                        "type": "variable_if",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": { "key_code": "s" },
+                                "to": [
+                                    {
+                                        "key_code": "backslash",
+                                        "modifiers": ["left_shift"]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "name": "symbol_layer",
+                                        "type": "variable_if",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": { "key_code": "d" },
+                                "to": [{ "key_code": "grave_accent_and_tilde" }],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "name": "symbol_layer",
+                                        "type": "variable_if",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": { "key_code": "f" },
+                                "to": [
+                                    {
+                                        "key_code": "grave_accent_and_tilde",
+                                        "modifiers": ["left_shift"]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "from": { "key_code": "comma" },
+                                "parameters": { "basic.to_if_alone_timeout_milliseconds": 200 },
+                                "to": [
+                                    {
+                                        "set_variable": {
+                                            "name": "symbol_layer",
+                                            "value": 1
+                                        }
+                                    }
+                                ],
+                                "to_after_key_up": [
+                                    {
+                                        "set_variable": {
+                                            "name": "symbol_layer",
+                                            "value": 0
+                                        }
+                                    }
+                                ],
+                                "to_if_alone": [{ "key_code": "comma" }],
+                                "type": "basic"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "name": "Default profile",
+            "selected": true,
+            "virtual_hid_keyboard": { "keyboard_type_v2": "ansi" }
+        }
+    ]
+}
+EOF
+}
+
+# Runs before the install, so Karabiner starts with this config rather than
+# writing its default one. Karabiner reloads the file whenever it changes.
+#
+# The comparison uses jq (part of macOS since 15), so it ignores formatting and
+# key order. It also ignores machine_specific: that section is keyed by a
+# per-machine ID and holds per-machine choices (like the external editor), so
+# it's kept as is. A config that differs otherwise is saved next to it, then
+# replaced.
+write_karabiner_config() {
+  local current machine backup new note=""
+  current=$(jq -S 'del(.machine_specific)' "$KARABINER_JSON" 2>/dev/null || true)
+  if [[ "$current" == "$(karabiner_config | jq -S .)" ]]; then
+    already_set "Config" "${(D)KARABINER_JSON}"
+    return 0
+  fi
+
+  mkdir -p "${KARABINER_JSON:h}"
+  if [[ -e "$KARABINER_JSON" ]]; then
+    backup="$KARABINER_JSON.$(date +%Y%m%d-%H%M%S).bak"
+    cp -p "$KARABINER_JSON" "$backup"
+    note=" (the old one is saved as ${(D)backup})"
+  fi
+  machine=$(jq -c '.machine_specific // {}' "$KARABINER_JSON" 2>/dev/null || print -r -- '{}')
+
+  # Write a temp file and rename it into place, so Karabiner never reads a
+  # half-written config. (mktemp's mode, 600, is what Karabiner uses too.)
+  new=$(mktemp "$KARABINER_JSON.XXXXXX")
+  karabiner_config |
+    jq --argjson machine "$machine" \
+      'if $machine == {} then . else .machine_specific = $machine end' > "$new"
+  mv -f "$new" "$KARABINER_JSON"
+  changed "Config" "${(D)KARABINER_JSON}$note"
+}
+
+# Skips if the app is there, however it was installed (brew would refuse to
+# install over it anyway).
+install_karabiner() {
+  if [[ -d "$KARABINER_APP" ]]; then
+    already_set "App" "installed"
+    return 0
+  fi
+
+  starting "App" "installing"
+  # The installer package needs sudo; brew uses the credentials cached by
+  # start_sudo.
+  start_sudo
+  brew install --cask karabiner-elements
+  changed "App" "installed"
+}
+
+# Asks Karabiner whether it's working, with the same check its Settings window
+# uses to decide what setup to show. current_setup names a missing permission
+# or approval (services, accessibility, input_monitoring, driver_extension);
+# current_alert names a problem (e.g. doctor: the config doesn't parse). Both
+# are "none" when all is well, but also for the first few seconds after
+# Karabiner starts, so the underlying state is checked too.
+#
+# On a new machine Karabiner isn't working until it's opened and given the
+# permissions it asks for (see the end of the script).
+check_karabiner() {
+  local guidance
+  # Prints nothing (and still exits 0) when Karabiner's services aren't running.
+  guidance=$("$KARABINER_CLI" --show-settings-window-guidance 2>/dev/null || true)
+  if [[ -z "$guidance" ]]; then
+    karabiner_needs=not_running
+  else
+    karabiner_needs=$(jq -r '
+      .core_service_daemon_state as $state
+      | $state.bundle_permission_check_result as $permissions
+      | if .current_setup != "none" then .current_setup
+        elif .current_alert != "none" then .current_alert
+        elif [.guidance_context.services_running,
+              $state.driver_activated,
+              $state.driver_connected,
+              $state.virtual_hid_keyboard_ready,
+              $permissions.accessibility_process_trusted,
+              $permissions.iohid_listen_event_allowed] | all then empty
+        else "starting" end' <<< "$guidance" 2>/dev/null) || karabiner_needs=unknown
+  fi
+
+  if [[ -z "$karabiner_needs" ]]; then
+    already_set "Status" "working"
+  else
+    failed "Status" "not working yet (${karabiner_needs//_/ })"
+  fi
+}
+
 # --- Caps Lock -> Control ----------------------------------------------------
 
+# Karabiner-Elements does this (and more) on every keyboard while it runs; this
+# is the fallback for when it isn't running.
+#
 # Writes the same pref as System Settings > Keyboard > Keyboard Shortcuts >
 # Modifier Keys. The pref is per keyboard, keyed by VendorID-ProductID-0; the
 # built-in keyboard on Apple Silicon is 0-0-0. External keyboards aren't covered.
@@ -812,6 +1070,10 @@ set_machine_name
 install_gallium
 install_command_line_tools
 install_homebrew
+section "Karabiner"
+write_karabiner_config
+install_karabiner
+check_karabiner
 section "Keyboard"
 show_input_menu
 caps_lock_to_control
@@ -872,6 +1134,20 @@ The Gallium keyboard layout was just installed. To enable it:
   1. Log out and back in.
   2. System Settings > Keyboard > Text Input > Input Sources > Edit...
   3. Click +, find Gallium, click Add.
+EOF
+fi
+
+if [[ -n "$karabiner_needs" ]]; then
+  open "$KARABINER_APP"
+  cat <<EOF
+
+Karabiner-Elements isn't working yet (${karabiner_needs//_/ }). To finish:
+  1. Follow the steps in its Settings window (just opened): it asks you to
+     allow its background services, Accessibility, and its driver extension,
+     each in System Settings.
+  2. Run this script again; the Karabiner Status line should say "working".
+  3. Try the keys in Karabiner-EventViewer: tapping Caps Lock shows escape;
+     holding it with another key shows left_control.
 EOF
 fi
 
