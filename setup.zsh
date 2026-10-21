@@ -137,6 +137,37 @@ show_input_menu() {
   echo "Input menu: done."
 }
 
+# --- Caps Lock -> Control ----------------------------------------------------
+
+# Writes the same pref as System Settings > Keyboard > Keyboard Shortcuts >
+# Modifier Keys. The pref is per keyboard, keyed by VendorID-ProductID-0; the
+# built-in keyboard on Apple Silicon is 0-0-0. External keyboards aren't covered.
+# Values are HID usages (page 7 << 32 | key): 0x39 is Caps Lock, 0xE4 is Control
+# (right Control, which is what System Settings writes).
+CAPS_LOCK=30064771129  # 0x700000039
+CONTROL=30064771300    # 0x7000000E4
+MODIFIER_PREF="com.apple.keyboard.modifiermapping.0-0-0"
+
+caps_lock_to_control() {
+  local current
+  current=$(defaults -currentHost read -g "$MODIFIER_PREF" 2>/dev/null || true)
+  if [[ "$current" == *"Dst = $CONTROL;"* && "$current" == *"Src = $CAPS_LOCK;"* ]]; then
+    echo "Caps Lock: already Control, skipping."
+    return 0
+  fi
+
+  echo "Caps Lock: mapping to Control..."
+  defaults -currentHost write -g "$MODIFIER_PREF" -array \
+    "<dict><key>HIDKeyboardModifierMappingSrc</key><integer>$CAPS_LOCK</integer><key>HIDKeyboardModifierMappingDst</key><integer>$CONTROL</integer></dict>"
+
+  # The pref is read at login; also apply it to the built-in keyboard now.
+  hidutil property \
+    --matching '{"Built-In":true,"PrimaryUsagePage":1,"PrimaryUsage":6}' \
+    --set "{\"UserKeyMapping\":[{\"HIDKeyboardModifierMappingSrc\":$CAPS_LOCK,\"HIDKeyboardModifierMappingDst\":$CONTROL}]}" \
+    > /dev/null
+  echo "Caps Lock: done."
+}
+
 # --- Dock --------------------------------------------------------------------
 
 clear_dock() {
@@ -162,6 +193,7 @@ start_sudo
 set_machine_name
 install_gallium
 show_input_menu
+caps_lock_to_control
 clear_dock
 
 echo "All steps complete."
