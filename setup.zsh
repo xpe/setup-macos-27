@@ -76,6 +76,135 @@ ask_settings() {
   # A valid hostname: lowercase letters, digits, hyphens; no hyphen at either end.
   ask_setting MACHINE_NAME "Machine name (lowercase, e.g. 'worf')" \
     '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+  # The SSH key's comment: just a label inside the public key. GitHub's guide
+  # suggests an email, but any word works, and one that isn't a real email is
+  # preferable: it keeps the address out of anything public. (A real or noreply
+  # address only buys GitHub attribution and "Verified" badges, which we don't
+  # care about.)
+  ask_setting SSH_KEY_COMMENT "SSH key comment (any word, e.g. 'david')"
+}
+
+# --- SSH key -----------------------------------------------------------------
+
+# Follows GitHub's guide, "Generating a new SSH key and adding it to the
+# ssh-agent" (macOS tab).
+SSH_DIR="$HOME/.ssh"
+SSH_KEY="$SSH_DIR/id_ed25519"
+SSH_CONFIG="$SSH_DIR/config"
+
+# Set to 1 by create_ssh_key when it creates a key; gates the GitHub message.
+ssh_key_created=0
+
+# ssh-keygen asks for a passphrase (twice), and ssh-add asks for it once more
+# to save it in the login keychain. These are the only prompts besides sudo,
+# so this runs before the long steps.
+create_ssh_key() {
+  if [[ -f "$SSH_KEY" ]]; then
+    echo "SSH key: $SSH_KEY already exists, skipping."
+    return 0
+  fi
+
+  echo "SSH key: creating $SSH_KEY (choose a passphrase; it's saved in the keychain)..."
+  mkdir -p -m 700 "$SSH_DIR"
+  ssh-keygen -t ed25519 -C "$SSH_KEY_COMMENT" -f "$SSH_KEY"
+  ssh_key_created=1
+
+  # Load the key into the agent and save its passphrase in the keychain. The
+  # agent is launchd's, found via SSH_AUTH_SOCK; it's missing when this script
+  # runs over SSH. Then the AddKeysToAgent and UseKeychain lines written by
+  # write_ssh_config do the same on the key's first use.
+  if [[ -n "${SSH_AUTH_SOCK:-}" ]]; then
+    ssh-add --apple-use-keychain "$SSH_KEY"
+  else
+    echo "SSH key: no ssh-agent; the passphrase is saved to the keychain on first use."
+  fi
+  echo "SSH key: done."
+}
+
+# A hardened client config for all hosts: modern algorithms only, one key,
+# no forwarding. It also has ssh load the key into the agent and get its
+# passphrase from the keychain, so it isn't asked for again (even after a
+# restart). An existing config is left alone, since it may hold other hosts;
+# compare it with this one by hand.
+write_ssh_config() {
+  if [[ -e "$SSH_CONFIG" ]]; then
+    echo "SSH config: $SSH_CONFIG already exists, skipping."
+    return 0
+  fi
+
+  echo "SSH config: writing $SSH_CONFIG..."
+  mkdir -p -m 700 "$SSH_DIR"
+  # The quoted 'EOF' writes the text as is, with no $ expansion.
+  cat > "$SSH_CONFIG" <<'EOF'
+Host *
+    # --- Host keys
+    # Ed25519 (certificates first), then RSA-SHA2 only (no SHA1).
+    # No ECDSA: a server offering only ECDSA host keys won't connect.
+    HostKeyAlgorithms ssh-ed25519-cert-v01@openssh.com,ssh-ed25519,rsa-sha2-512,rsa-sha2-256
+
+    # --- Key exchange
+    # Post-quantum first (mlkem768x25519 = NIST-standardized PQC;
+    # sntrup761 = OpenSSH's own PQ hybrid). Then classic ECDH.
+    # NO weak DH groups (group14, group1, etc.)
+    KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group18-sha512,diffie-hellman-group16-sha512
+
+    # --- Ciphers
+    # AEAD-only (authenticated encryption). ChaCha20 first, then
+    # AES-GCM. CBC and CTR modes are excluded.
+    Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
+
+    # --- MACs
+    # AEAD ciphers don't use these; this only matters if a non-AEAD
+    # cipher is ever allowed. Encrypt-then-MAC (EtM) variants only.
+    MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com
+
+    # --- Authentication ----------------------------------------------
+
+    # Only allow use of IdentityFiles defined in this config
+    IdentitiesOnly yes
+
+    # Default key - use Ed25519. Generate with:
+    # `ssh-keygen -t ed25519 -C "you@host"`
+    IdentityFile ~/.ssh/id_ed25519
+
+    # macOS. IgnoreUnknown must come before UseKeychain, which only
+    # Apple's ssh knows (Homebrew's OpenSSH would stop with an error).
+    IgnoreUnknown UseKeychain
+    AddKeysToAgent yes
+    UseKeychain yes
+
+    # --- Attack surface reduction ------------------------------------
+
+    # Disable host-based auth (trusts /etc/hosts.equiv — don't)
+    HostbasedAuthentication no
+
+    # Disable agent forwarding globally; enable per host only
+    # when you truly need it. A compromised server can hijack it.
+    ForwardAgent no
+
+    # Disable X11 forwarding (rarely needed, big attack surface).
+    ForwardX11 no
+    ForwardX11Trusted no
+
+    # Don't run local commands triggered by the server.
+    PermitLocalCommand no
+
+    # Hash entries in known_hosts so a stolen file doesn't reveal
+    # which hosts you connect to. (Applies to new entries; run
+    # `ssh-keygen -H` once to hash existing ones.)
+    HashKnownHosts yes
+
+    # Ask before trusting an unknown host's key. (A changed key is
+    # always refused, whatever this is set to.)
+    StrictHostKeyChecking ask
+
+    # --- Session hygiene ---------------------------------------------
+    # Send keepalives every 60s; drop after 3 missed replies (3 min).
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+EOF
+  chmod 600 "$SSH_CONFIG"
+  echo "SSH config: done."
 }
 
 # --- Command Line Tools ------------------------------------------------------
@@ -567,8 +696,11 @@ disable_show_desktop_gesture() {
 
 load_settings
 ask_settings
-# The steps that may need sudo run first, so on a new machine the password
-# prompt comes right away and the rest of the run is unattended.
+# The steps that prompt (for the SSH passphrase, or for sudo) run first, so on
+# a new machine the prompts come right away and the rest of the run is
+# unattended.
+create_ssh_key
+write_ssh_config
 set_machine_name
 install_gallium
 install_command_line_tools
@@ -627,5 +759,17 @@ The Gallium keyboard layout was just installed. To enable it:
   1. Log out and back in.
   2. System Settings > Keyboard > Text Input > Input Sources > Edit...
   3. Click +, find Gallium, click Add.
+EOF
+fi
+
+if (( ssh_key_created )); then
+  pbcopy < "$SSH_KEY.pub"
+  cat <<EOF
+
+A new SSH key was created. To add it to GitHub:
+  1. Its public key is on the clipboard (it's also in $SSH_KEY.pub).
+  2. Go to https://github.com/settings/ssh/new, paste it, and add it as an
+     Authentication Key.
+  3. Check it works: ssh -T git@github.com
 EOF
 fi
