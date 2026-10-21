@@ -6,19 +6,22 @@ set -euo pipefail
 
 # --- Cleanup ---------------------------------------------------------------
 
-# Globals: set by start_sudo / install_command_line_tools / install_gallium,
-# read by cleanup.
+# Globals: set by start_sudo / install_command_line_tools / install_gallium /
+# clone_dot_files, read by cleanup.
 # Defined empty up front so cleanup can read them under `set -u` even if
 # the script exits before they are set.
 keepalive_pid=""
 tmp=""
 clt_placeholder=""
+dot_files_clone=""
 
 # Stop the sudo keep-alive loop and remove the temp files, if they exist.
+# dot_files_clone is set only while jj is cloning.
 cleanup() {
   [[ -n "$keepalive_pid" ]] && kill "$keepalive_pid" 2>/dev/null
   [[ -n "$tmp" ]] && rm -rf "$tmp"
   [[ -n "$clt_placeholder" ]] && rm -f "$clt_placeholder"
+  [[ -n "$dot_files_clone" ]] && rm -rf "$dot_files_clone"
   return 0
 }
 
@@ -333,6 +336,110 @@ install_homebrew() {
   fi
   # Put brew on PATH for the rest of this script.
   eval "$("$BREW" shellenv)"
+}
+
+# --- jj ----------------------------------------------------------------------
+
+# Jujutsu, the version control system. Its config comes with the dot files.
+JJ="/opt/homebrew/bin/jj"
+
+install_jj() {
+  if [[ -x "$JJ" ]]; then
+    already_set "jj" "installed"
+    return 0
+  fi
+
+  starting "jj" "installing"
+  brew install jj
+  changed "jj" "installed"
+}
+
+# --- Dot files ---------------------------------------------------------------
+
+DOT_CONFIG="$HOME/.config"
+DOT_CONFIG_URL="git@github.com:xpe/dot-config.git"
+
+# Set to 1 by clone_dot_files when GitHub doesn't accept the SSH key yet;
+# gates the message at the end.
+dot_files_need_github=0
+
+# ssh -T exits 1 even when the key is accepted (GitHub gives no shell), so its
+# greeting is checked instead. BatchMode makes ssh fail rather than ask
+# anything, such as whether to trust GitHub's host key on first contact.
+github_accepts_ssh_key() {
+  local greeting
+  greeting=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 git@github.com 2>&1 || true)
+  [[ "$greeting" == *"successfully authenticated"* ]]
+}
+
+# Usage: merge_into SRC DEST
+# Moves each entry of SRC that DEST doesn't have into DEST. A directory both
+# have is merged the same way; a file both have with the same contents is
+# deleted from SRC. What's left in SRC is what DEST has differently.
+merge_into() {
+  local src=$1 dest=$2 entry target
+  # (DN): include dotfiles, and no error if the directory is empty.
+  for entry in "$src"/*(DN); do
+    target="$dest/${entry:t}"  # :t is zsh for basename
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      mv "$entry" "$target"
+    elif [[ -d "$entry" && ! -L "$entry" && -d "$target" && ! -L "$target" ]]; then
+      merge_into "$entry" "$target"
+    elif [[ -f "$entry" && -f "$target" ]] && cmp -s "$entry" "$target"; then
+      rm -f "$entry"
+    fi
+  done
+}
+
+# Clones the dot files as ~/.config, a jj repo that isn't colocated (no .git
+# next to .jj; colocation is jj's default, hence --no-colocate).
+#
+# ~/.config already exists by now (this script's settings are in it, and jj
+# itself keeps per-repo config under ~/.config/jj/repos), but jj only clones
+# into an empty directory. So the clone goes into a new directory, the files
+# already in ~/.config that the dot files don't have are moved into it, and it
+# then takes ~/.config's place. Files the dot files have differently are kept
+# in a backup next to it.
+#
+# On a new machine GitHub doesn't have the SSH key yet, so the first run skips
+# this (see the end of the script).
+clone_dot_files() {
+  local clone leftovers note=""
+  if [[ -d "$DOT_CONFIG/.jj" ]]; then
+    already_set "Dot files" "${(D)DOT_CONFIG}"
+    return 0
+  fi
+  if ! github_accepts_ssh_key; then
+    dot_files_need_github=1
+    failed "Dot files" "not cloned (GitHub doesn't accept the SSH key yet)"
+    return 0
+  fi
+
+  starting "Dot files" "cloning into ${(D)DOT_CONFIG}"
+  # In $HOME, so the moves below are renames on the same disk.
+  clone=$(mktemp -d "$HOME/.config-clone.XXXXXX")
+  dot_files_clone=$clone
+  # jj has no name and email configured until the dot files are in place, and
+  # warns about it. JJ_USER and JJ_EMAIL stand in for the clone's working-copy
+  # commit; metaedit below puts the configured ones in their place.
+  JJ_USER=setup-macos JJ_EMAIL=setup-macos \
+    jj git clone --quiet --no-colocate "$DOT_CONFIG_URL" "$clone"
+  # From here on the clone holds files moved from ~/.config, so it's no longer
+  # cleanup's to remove.
+  dot_files_clone=""
+
+  merge_into "$DOT_CONFIG" "$clone"
+  # Remove the directories that are now empty, ~/.config included if it is.
+  find "$DOT_CONFIG" -depth -type d -empty -delete
+  if [[ -e "$DOT_CONFIG" ]]; then
+    leftovers="$DOT_CONFIG.$(date +%Y%m%d-%H%M%S).bak"
+    mv "$DOT_CONFIG" "$leftovers"
+    note=" (files it had differently are saved in ${(D)leftovers})"
+  fi
+  mv "$clone" "$DOT_CONFIG"
+
+  jj -R "$DOT_CONFIG" --quiet metaedit --update-author
+  changed "Dot files" "${(D)DOT_CONFIG}$note"
 }
 
 # --- Machine name ------------------------------------------------------------
@@ -1072,6 +1179,10 @@ set_machine_name
 install_gallium
 install_command_line_tools
 install_homebrew
+# Before Karabiner, so its config comes from the dot files once they're cloned.
+section "Dot files"
+install_jj
+clone_dot_files
 section "Karabiner"
 write_karabiner_config
 install_karabiner
@@ -1162,5 +1273,14 @@ A new SSH key was created. To add it to GitHub:
   2. Go to https://github.com/settings/ssh/new, paste it, and add it as an
      Authentication Key.
   3. Check it works: ssh -T git@github.com
+EOF
+fi
+
+if (( dot_files_need_github )); then
+  cat <<'EOF'
+
+The dot files weren't cloned into ~/.config: GitHub doesn't accept the SSH
+key yet. Once 'ssh -T git@github.com' greets you by name (the first time, it
+asks you to trust GitHub's host key), run this script again.
 EOF
 fi
